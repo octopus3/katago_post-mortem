@@ -1,0 +1,21 @@
+katago:
+  executable: "path/to/katago.exe"       # KataGo 可执行文件路径
+  model: "path/to/model.bin.gz"          # 神经网络权重文件路径
+  config: ""                              # analysis_config.cfg 路径（留空使用默认配置）
+  max_visits: 500                         # 每个局面的搜索次数
+  threads: 4                              # 搜索线程数
+
+review:
+  winrate_threshold: 0.05                 # 胜率跌幅阈值（5% 视为问题手）
+  top_variations: 3                       # 展示的候选变化数
+  variation_depth: 8                      # 每个变化展示的后续手数
+
+llm:
+  provider: "openai"                      # openai / anthropic / deepseek / ollama
+  model: "openai/MiniMax-M2.5"               # 加 openai/ 前缀走兼容协议
+  api_key: ""                             # API Key（留空则从环境变量读取）
+  base_url: "https://api.minimaxi.com/v1"                            # 自定义端点（Ollama 等本地服务使用）
+
+server:
+  host: "127.0.0.1"
+  port: 8000
