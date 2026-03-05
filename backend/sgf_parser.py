@@ -117,6 +117,10 @@ def gtp_to_point(gtp: str, board_size: int = 19) -> Tuple[int, int]:
 def parse_sgf(sgf_text: str) -> ParsedGame:
     """解析 SGF 字符串，返回 :class:`ParsedGame`。
 
+    许多围棋服务器（Fox Weiqi、弈城等）导出的 SGF 使用 UTF-8 编码
+    但不包含 ``CA[UTF-8]`` 声明，导致 sgfmill 按 latin-1 解码产生乱码。
+    本函数会自动检测并注入编码声明。
+
     Raises:
         ValueError: SGF 格式无效。
     """
@@ -124,6 +128,9 @@ def parse_sgf(sgf_text: str) -> ParsedGame:
         sgf_bytes = sgf_text.encode("utf-8")
     else:
         sgf_bytes = sgf_text
+
+    if b"CA[" not in sgf_bytes and b"(;" in sgf_bytes:
+        sgf_bytes = sgf_bytes.replace(b"(;", b"(;CA[UTF-8]", 1)
 
     try:
         game = sgf.Sgf_game.from_bytes(sgf_bytes)

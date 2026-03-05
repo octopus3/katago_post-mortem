@@ -4,15 +4,145 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KataGo 复盘</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-    <div id="app">
+
+<!-- Upload Overlay -->
+<div id="upload-overlay" class="upload-overlay">
+    <div class="upload-box">
+        <div class="upload-logo">⚫⚪</div>
         <h1>KataGo 复盘工具</h1>
+        <p class="upload-desc">上传 SGF 棋谱文件，获取 AI 深度复盘分析</p>
+        <div class="upload-drop-zone" id="drop-zone">
+            <div class="drop-icon">📂</div>
+            <p>将 SGF 文件拖拽到此处</p>
+            <span class="upload-divider">或者</span>
+            <label class="btn btn-primary">
+                选择文件
+                <input type="file" id="file-input" accept=".sgf" hidden>
+            </label>
+        </div>
+        <div id="upload-error" class="upload-error hidden"></div>
+    </div>
+</div>
+
+<!-- Main App -->
+<div id="app" class="app hidden">
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">⚫ KataGo 复盘</span>
+        </div>
+        <div class="header-center" id="game-info-header"></div>
+        <div class="header-right">
+            <button class="btn btn-sm btn-outline" id="btn-new-game">上传新棋谱</button>
+        </div>
+    </header>
+
+    <!-- Progress -->
+    <div id="progress-section" class="progress-section hidden">
+        <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+        <div class="progress-text" id="progress-text">准备分析…</div>
     </div>
 
-    <script src="js/board.js"></script>
-    <script src="js/chart.js"></script>
-    <script src="js/app.js"></script>
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Left: Board -->
+        <div class="board-column">
+            <div class="board-wrapper">
+                <canvas id="board-canvas"></canvas>
+            </div>
+            <div class="nav-controls">
+                <button class="nav-btn" id="btn-first" title="起始 (Home)">⏮</button>
+                <button class="nav-btn" id="btn-prev10" title="后退10手 (Shift+←)">⏪</button>
+                <button class="nav-btn" id="btn-prev" title="上一手 (←)">◀</button>
+                <span class="move-indicator" id="move-indicator">0 / 0</span>
+                <button class="nav-btn" id="btn-next" title="下一手 (→)">▶</button>
+                <button class="nav-btn" id="btn-next10" title="前进10手 (Shift+→)">⏩</button>
+                <button class="nav-btn" id="btn-last" title="末尾 (End)">⏭</button>
+            </div>
+            <input type="range" id="move-slider" class="move-slider" min="0" max="0" value="0">
+            <div class="board-options">
+                <label class="opt-label"><input type="checkbox" id="chk-coords" checked> 坐标</label>
+                <label class="opt-label"><input type="checkbox" id="chk-numbers"> 手数</label>
+                <label class="opt-label"><input type="checkbox" id="chk-best-move"> 最佳着点</label>
+            </div>
+            <div id="review-actions" class="review-actions">
+                <button class="btn btn-primary btn-lg" id="btn-start-review">开始 AI 复盘分析</button>
+                <label class="opt-label">
+                    <input type="checkbox" id="chk-with-comments" checked> 生成 LLM 解说
+                </label>
+            </div>
+        </div>
+
+        <!-- Right: Info Panels -->
+        <div class="info-column">
+            <!-- Game Info -->
+            <div class="card">
+                <div class="card-head">棋谱信息</div>
+                <div class="card-body" id="game-info-body">
+                    <div class="placeholder">加载棋谱后显示</div>
+                </div>
+            </div>
+
+            <!-- Winrate Chart -->
+            <div class="card">
+                <div class="card-head">胜率曲线</div>
+                <div class="card-body chart-wrap">
+                    <canvas id="winrate-chart"></canvas>
+                </div>
+            </div>
+
+            <!-- Move Analysis -->
+            <div class="card" id="analysis-card">
+                <div class="card-head">
+                    <span>着手分析</span>
+                    <span id="severity-badge" class="badge hidden"></span>
+                </div>
+                <div class="card-body" id="analysis-body">
+                    <div class="placeholder">浏览棋谱或完成分析后查看</div>
+                </div>
+            </div>
+
+            <!-- Variations -->
+            <div class="card">
+                <div class="card-head">推荐变化</div>
+                <div class="card-body" id="variations-body">
+                    <div class="placeholder">完成分析后查看推荐变化</div>
+                </div>
+            </div>
+
+            <!-- LLM Commentary -->
+            <div class="card">
+                <div class="card-head">
+                    <span>AI 解说</span>
+                    <button class="btn btn-xs btn-ghost" id="btn-gen-comment">生成解说</button>
+                </div>
+                <div class="card-body" id="comment-body">
+                    <div class="placeholder">问题手将自动获得 AI 解说</div>
+                </div>
+            </div>
+
+            <!-- Problem Moves -->
+            <div class="card">
+                <div class="card-head">
+                    <span>问题手列表</span>
+                    <span id="problem-count" class="badge badge-count hidden"></span>
+                </div>
+                <div class="card-body problems-wrap" id="problems-body">
+                    <div class="placeholder">完成分析后查看问题手</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/board.js"></script>
+<script src="/static/js/chart.js"></script>
+<script src="/static/js/app.js"></script>
 </body>
 </html>
