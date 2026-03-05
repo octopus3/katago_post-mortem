@@ -174,6 +174,8 @@ def _extract_info(root, board_size: int) -> GameInfo:
         komi = float(komi_raw)
     except (ValueError, TypeError):
         komi = 7.5
+    if abs(komi) > 100:
+        komi = komi / 100.0 if abs(komi) > 300 else komi / 10.0
 
     handicap_raw = _sgf_get(root, "HA")
     try:

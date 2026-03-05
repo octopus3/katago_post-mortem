@@ -46,7 +46,10 @@
         <div class="progress-bar-track">
             <div class="progress-bar-fill" id="progress-bar"></div>
         </div>
-        <div class="progress-text" id="progress-text">准备分析…</div>
+        <div style="display:flex;align-items:center;gap:12px;justify-content:center">
+            <div class="progress-text" id="progress-text">准备分析…</div>
+            <button class="btn btn-danger btn-sm" id="btn-stop-review" title="停止分析并生成已完成部分的结果">停止分析</button>
+        </div>
     </div>
 
     <!-- Main Content -->
@@ -91,7 +94,14 @@
 
             <!-- Winrate Chart -->
             <div class="card">
-                <div class="card-head">胜率曲线</div>
+                <div class="card-head">
+                    <span>胜率曲线</span>
+                    <div class="chart-view-btns" id="chart-view-btns">
+                        <button class="view-btn active" data-view="both">双方</button>
+                        <button class="view-btn" data-view="black">黑方</button>
+                        <button class="view-btn" data-view="white">白方</button>
+                    </div>
+                </div>
                 <div class="card-body chart-wrap">
                     <canvas id="winrate-chart"></canvas>
                 </div>
@@ -119,11 +129,11 @@
             <!-- LLM Commentary -->
             <div class="card">
                 <div class="card-head">
-                    <span>AI 解说</span>
-                    <button class="btn btn-xs btn-ghost" id="btn-gen-comment">生成解说</button>
+                    <span>AI 评价</span>
+                    <button class="btn btn-xs btn-ghost" id="btn-gen-comment">生成评价</button>
                 </div>
                 <div class="card-body" id="comment-body">
-                    <div class="placeholder">问题手将自动获得 AI 解说</div>
+                    <div class="placeholder">问题手将自动获得 AI 评价</div>
                 </div>
             </div>
 
@@ -141,8 +151,8 @@
     </div>
 </div>
 
-<script src="/static/js/board.js"></script>
-<script src="/static/js/chart.js"></script>
-<script src="/static/js/app.js"></script>
+<script src="/static/js/board.js?v=4"></script>
+<script src="/static/js/chart.js?v=4"></script>
+<script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

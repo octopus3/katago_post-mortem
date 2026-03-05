@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -55,6 +55,7 @@ class GameSession:
     result: Optional[ReviewResult] = None
     error: Optional[str] = None
     ws_clients: List[WebSocket] = field(default_factory=list)
+    cancel_event: Optional[asyncio.Event] = None
 
 
 _games: Dict[str, GameSession] = {}
@@ -116,7 +117,8 @@ async def lifespan(app: FastAPI):
         await engine.start()
         logger.info("KataGo 引擎已就绪")
     except Exception as e:
-        logger.warning("KataGo 启动失败 (%s)，分析功能将不可用。请检查 config.yaml 中的路径配置。", e)
+        logger.warning("KataGo 启动失败 [%s: %s]，分析功能将不可用。请检查 config.yaml 中的路径配置。",
+                       type(e).__name__, e)
     yield
     logger.info("关闭 KataGo 引擎 …")
     await engine.stop()
@@ -133,6 +135,16 @@ app.add_middleware(
 )
 
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
 if _FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_FRONTEND_DIR)), name="static")
 
@@ -292,6 +304,7 @@ async def start_review(game_id: str, body: ReviewRequest = ReviewRequest()):
     session.progress_total = session.parsed.total_moves + 1
     session.result = None
     session.error = None
+    session.cancel_event = asyncio.Event()
 
     asyncio.create_task(_run_review(session, with_comments=body.withComments))
 
@@ -299,6 +312,20 @@ async def start_review(game_id: str, body: ReviewRequest = ReviewRequest()):
         gameId=game_id,
         message=f"复盘分析已启动，共需分析 {session.progress_total} 个局面",
     )
+
+
+@app.post("/api/review/{game_id}/stop")
+async def stop_review(game_id: str):
+    """中止正在进行的复盘分析，已完成的部分将生成结果。"""
+    session = _get_session(game_id)
+    if session.status != GameStatus.ANALYZING:
+        raise HTTPException(status_code=400, detail="当前没有进行中的分析")
+    if session.cancel_event is None:
+        raise HTTPException(status_code=400, detail="无法取消该分析")
+
+    session.cancel_event.set()
+    logger.info("收到停止请求: %s (已完成 %d/%d)", game_id, session.progress_current, session.progress_total)
+    return {"gameId": game_id, "message": "已发送停止信号，正在生成部分结果…"}
 
 
 async def _run_review(session: GameSession, with_comments: bool = True):
@@ -319,11 +346,22 @@ async def _run_review(session: GameSession, with_comments: bool = True):
             session.parsed,
             with_comments=with_comments,
             progress_callback=on_progress,
+            cancel_event=session.cancel_event,
         )
         session.result = result
+        cancelled = session.cancel_event is not None and session.cancel_event.is_set()
         session.status = GameStatus.DONE
-        await _broadcast_ws(session, {"type": "done", "totalProblems": result.total_problems})
-        logger.info("复盘完成: %s (%d 个问题手)", session.game_id, result.total_problems)
+        await _broadcast_ws(session, {
+            "type": "done",
+            "totalProblems": result.total_problems,
+            "partial": cancelled,
+            "analyzedMoves": result.total_moves,
+        })
+        if cancelled:
+            logger.info("复盘被中止: %s (已分析 %d/%d 手, %d 个问题手)",
+                        session.game_id, result.total_moves, session.parsed.total_moves, result.total_problems)
+        else:
+            logger.info("复盘完成: %s (%d 个问题手)", session.game_id, result.total_problems)
     except Exception as e:
         session.status = GameStatus.ERROR
         session.error = str(e)

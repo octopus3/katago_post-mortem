@@ -31,15 +31,15 @@ ProgressCallback = Optional[Callable[[int, int], Coroutine]]
 
 class Severity(str, Enum):
     """问题手严重程度。"""
-    MINOR = "minor"               # 小疑问手 2–5 %
-    QUESTIONABLE = "questionable"  # 疑问手   5–10 %
-    BAD = "bad"                    # 恶手     10 %+
+    MINOR = "minor"               # 小疑问手 15%+
+    QUESTIONABLE = "questionable"  # 疑问手   20%+
+    BAD = "bad"                    # 恶手     25%+
 
 
 _SEVERITY_THRESHOLDS: List[Tuple[float, Severity]] = [
-    (0.10, Severity.BAD),
-    (0.05, Severity.QUESTIONABLE),
-    (0.02, Severity.MINOR),
+    (0.25, Severity.BAD),
+    (0.20, Severity.QUESTIONABLE),
+    (0.15, Severity.MINOR),
 ]
 
 _SEVERITY_CN: Dict[Severity, str] = {
@@ -50,7 +50,7 @@ _SEVERITY_CN: Dict[Severity, str] = {
 
 
 def _classify_severity(wr_drop: float) -> Optional[Severity]:
-    """根据胜率跌幅返回严重程度等级，低于 2% 返回 None。"""
+    """根据胜率跌幅返回严重程度等级，低于 15% 返回 None。"""
     for threshold, sev in _SEVERITY_THRESHOLDS:
         if wr_drop >= threshold:
             return sev
@@ -173,6 +173,7 @@ class ReviewResult:
     move_analyses: List[MoveAnalysis]
     problem_moves: List[MoveAnalysis]
     black_winrate_curve: List[float]
+    white_winrate_curve: List[float] = field(default_factory=list)
     initial_black_winrate: float = 0.5
 
     @property
@@ -195,6 +196,7 @@ class ReviewResult:
                 for m in self.problem_moves
             ],
             "blackWinrateCurve": [round(w, 4) for w in self.black_winrate_curve],
+            "whiteWinrateCurve": [round(w, 4) for w in self.white_winrate_curve],
         }
 
 
@@ -232,6 +234,7 @@ class Reviewer:
         *,
         with_comments: bool = True,
         progress_callback: ProgressCallback = None,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> ReviewResult:
         """对一盘棋进行完整复盘。
 
@@ -239,6 +242,7 @@ class Reviewer:
             game: sgf_parser.parse_sgf() 返回的 ParsedGame
             with_comments: 是否为问题手生成 LLM 解说
             progress_callback: ``async callable(current, total)`` 进度回调
+            cancel_event: 外部可设置此事件来中途停止分析，已完成的部分将生成结果
 
         Returns:
             ReviewResult 包含每手分析、问题手列表、胜率曲线等
@@ -248,36 +252,45 @@ class Reviewer:
             game.info.black_player, game.info.white_player, game.total_moves,
         )
 
-        raw = await self._analyze_all_positions(game, progress_callback)
+        raw = await self._analyze_all_positions(game, progress_callback, cancel_event)
+
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        analyzed_moves = len(raw) - 1
+
+        if analyzed_moves < 1:
+            raise RuntimeError("分析数据不足，至少需要完成 1 手的分析")
 
         initial_root = raw[0].get("rootInfo", {})
-        initial_black_wr = initial_root.get("winrate", 0.5)
+        initial_black_wr = self._to_black_wr(initial_root)
 
         move_analyses = self._compute_move_analyses(game, raw)
         problem_moves = [m for m in move_analyses if m.is_problem]
 
-        if with_comments and self._llm and problem_moves:
+        if with_comments and self._llm and problem_moves and not cancelled:
             comment_targets = [
                 m for m in problem_moves
                 if m.winrate_drop >= self._cfg.winrate_threshold
             ]
             if comment_targets:
-                await self._generate_comments(game, comment_targets)
+                await self._generate_comments(game, comment_targets, move_analyses)
 
-        curve = [initial_black_wr] + [m.black_winrate for m in move_analyses]
+        black_curve = [initial_black_wr] + [m.black_winrate for m in move_analyses]
+        white_curve = [1.0 - w for w in black_curve]
 
         result = ReviewResult(
             game_info=_build_game_info(game),
             move_analyses=move_analyses,
             problem_moves=problem_moves,
-            black_winrate_curve=curve,
+            black_winrate_curve=black_curve,
+            white_winrate_curve=white_curve,
             initial_black_winrate=initial_black_wr,
         )
 
         n_major = sum(1 for m in problem_moves if m.severity in (Severity.QUESTIONABLE, Severity.BAD))
+        status = f"复盘{'被中止' if cancelled else '完成'}"
         logger.info(
-            "复盘完成: %d 手, %d 个问题手 (%d 个疑问手/恶手)",
-            result.total_moves, result.total_problems, n_major,
+            "%s: %d/%d 手, %d 个问题手 (%d 个疑问手/恶手)",
+            status, result.total_moves, game.total_moves, result.total_problems, n_major,
         )
         return result
 
@@ -287,16 +300,22 @@ class Reviewer:
         self,
         game: ParsedGame,
         progress_callback: ProgressCallback = None,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> List[Dict[str, Any]]:
         """分析从初始局面到最终局面的所有位置（共 total_moves + 1 个）。
 
         每个位置对应 ``game.moves_up_to(i)``，其中 i ∈ [0, total_moves]。
         请求中包含 ``includeOwnership: true`` 以获取领地归属数据。
+        若 cancel_event 被设置，循环将提前退出并返回已完成的部分。
         """
         total = game.total_moves + 1
         results: List[Dict[str, Any]] = []
 
         for i in range(total):
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("分析被取消，已完成 %d/%d 个局面", len(results), total)
+                break
+
             moves = game.moves_up_to(i)
             resp = await self._engine.query(
                 moves=moves,
@@ -315,6 +334,22 @@ class Reviewer:
 
     # ── 胜率落差 & 问题手识别 ────────────────────────────────
 
+    @staticmethod
+    def _to_black_wr(root_info: Dict[str, Any]) -> float:
+        """将 rootInfo 的 winrate 统一转换为黑方视角。"""
+        wr = root_info.get("winrate", 0.5)
+        if root_info.get("currentPlayer", "B") == "W":
+            return 1.0 - wr
+        return wr
+
+    @staticmethod
+    def _to_black_score(root_info: Dict[str, Any]) -> float:
+        """将 rootInfo 的 scoreLead 统一转换为黑方视角（正=黑优）。"""
+        score = root_info.get("scoreLead", 0.0)
+        if root_info.get("currentPlayer", "B") == "W":
+            return -score
+        return score
+
     def _compute_move_analyses(
         self,
         game: ParsedGame,
@@ -322,31 +357,50 @@ class Reviewer:
     ) -> List[MoveAnalysis]:
         """对比相邻位置的 KataGo 评估值，计算每手的胜率落差并分级。
 
-        KataGo rootInfo.winrate 是从「当前行棋方」视角给出的胜率。
-        落子前 raw[i] 的 rootInfo 对应行棋方（即 move.color），
-        落子后 raw[i+1] 的 rootInfo 对应对手方。
-        因此行棋方落子后的实际胜率 = 1 − raw[i+1].rootInfo.winrate。
+        先用 rootInfo.currentPlayer 将所有数值统一到黑方视角，
+        再根据 move.color 转换到行棋方视角来计算落差。
         """
         analyses: List[MoveAnalysis] = []
         bs = game.info.board_size
+        analyzed_count = len(raw) - 1
 
-        for i, move in enumerate(game.moves):
+        for i, move in enumerate(game.moves[:analyzed_count]):
             root_before = raw[i].get("rootInfo", {})
             root_after = raw[i + 1].get("rootInfo", {})
 
-            wr_before = root_before.get("winrate", 0.5)
-            score_before = root_before.get("scoreLead", 0.0)
+            bwr_before = self._to_black_wr(root_before)
+            bwr_after = self._to_black_wr(root_after)
+            bsc_before = self._to_black_score(root_before)
+            bsc_after = self._to_black_score(root_after)
 
-            wr_after_opp = root_after.get("winrate", 0.5)
-            score_after_opp = root_after.get("scoreLead", 0.0)
+            if i < 5 or i % 50 == 0:
+                logger.info(
+                    "第%d手 %s %s | raw_before: cp=%s wr=%.4f score=%.2f | "
+                    "raw_after: cp=%s wr=%.4f score=%.2f | "
+                    "black_wr_before=%.4f black_wr_after=%.4f",
+                    move.move_number, move.color, move.gtp_coord,
+                    root_before.get("currentPlayer"), root_before.get("winrate"),
+                    root_before.get("scoreLead", 0),
+                    root_after.get("currentPlayer"), root_after.get("winrate"),
+                    root_after.get("scoreLead", 0),
+                    bwr_before, bwr_after,
+                )
 
-            wr_after = 1.0 - wr_after_opp
-            score_after = -score_after_opp
+            if move.color == "B":
+                wr_before = bwr_before
+                wr_after = bwr_after
+                score_before = bsc_before
+                score_after = bsc_after
+            else:
+                wr_before = 1.0 - bwr_before
+                wr_after = 1.0 - bwr_after
+                score_before = -bsc_before
+                score_after = -bsc_after
 
             wr_drop = wr_before - wr_after
             score_drop = score_before - score_after
 
-            black_wr = wr_after if move.color == "B" else wr_after_opp
+            black_wr = bwr_after
 
             variations = self._extract_variations(raw[i])
             severity = _classify_severity(wr_drop)
@@ -418,11 +472,23 @@ class Reviewer:
         self,
         game: ParsedGame,
         targets: List[MoveAnalysis],
+        all_analyses: List[MoveAnalysis],
     ) -> None:
-        """为目标问题手逐个生成 LLM 解说，结果直接写入 MoveAnalysis.comment。"""
+        """为目标问题手逐个生成 LLM 解说，结果直接写入 MoveAnalysis.comment。
+
+        通过 all_analyses 获取上一手和下一手的上下文，让解说能
+        结合前后手的因果关系进行分析。
+        """
         logger.info("为 %d 个问题手生成 LLM 解说 …", len(targets))
+
+        idx_by_move = {m.move_number: i for i, m in enumerate(all_analyses)}
+
         for idx, ma in enumerate(targets):
-            prompt = self._build_comment_prompt(game, ma)
+            ai = idx_by_move.get(ma.move_number)
+            prev_ma = all_analyses[ai - 1] if ai is not None and ai > 0 else None
+            next_ma = all_analyses[ai + 1] if ai is not None and ai + 1 < len(all_analyses) else None
+
+            prompt = self._build_comment_prompt(game, ma, prev_ma, next_ma)
             try:
                 ma.comment = (await self._llm.chat(prompt)).strip()
                 logger.debug("第 %d 手解说完成 (%d/%d)", ma.move_number, idx + 1, len(targets))
@@ -430,50 +496,111 @@ class Reviewer:
                 logger.exception("LLM 解说失败: 第 %d 手", ma.move_number)
                 ma.comment = ""
 
-    def _build_comment_prompt(self, game: ParsedGame, ma: MoveAnalysis) -> str:
-        """按「目数 → 厚薄 → 死活」优先级为问题手组装 LLM prompt。"""
-        sev_text = _SEVERITY_CN.get(ma.severity, "问题手")
-        color_cn = "黑" if ma.color == "B" else "白"
-
-        # — 候选变化 —
-        var_lines: List[str] = []
-        for j, v in enumerate(ma.best_variations, 1):
-            pv_str = " → ".join(v.pv[:6]) if v.pv else "无"
-            var_lines.append(
+    @staticmethod
+    def _format_variations(variations: List[Variation], max_n: int = 3) -> str:
+        """格式化候选变化列表为可读文本。"""
+        lines: List[str] = []
+        for j, v in enumerate(variations[:max_n], 1):
+            pv_str = " → ".join(v.pv[:8]) if v.pv else "无"
+            lines.append(
                 f"  {j}. {v.move}  胜率={v.winrate:.1%}  目差={v.score_lead:+.1f}  "
                 f"访问={v.visits}  变化={pv_str}"
             )
-        vars_text = "\n".join(var_lines) or "  无推荐变化"
+        return "\n".join(lines) or "  无推荐变化"
 
-        # — ownership 分析段落 —
-        ownership_section = ""
-        if ma.ownership_context:
-            ownership_section = (
-                f"\n{ma.ownership_context}\n"
+    def _build_comment_prompt(
+        self,
+        game: ParsedGame,
+        ma: MoveAnalysis,
+        prev_ma: Optional[MoveAnalysis],
+        next_ma: Optional[MoveAnalysis],
+    ) -> str:
+        """结合上一手、当前手、下一手的完整上下文为问题手组装 LLM prompt。
+
+        分析角度: 目数/实地、厚薄/棋型、死活，并重点解释
+        失误导致的因果关系（对手如何惩罚）。
+        """
+        sev_text = _SEVERITY_CN.get(ma.severity, "问题手")
+        color_cn = "黑" if ma.color == "B" else "白"
+        opp_cn = "白" if ma.color == "B" else "黑"
+
+        # ── 上一手（背景） ──
+        prev_section = ""
+        if prev_ma:
+            prev_color = "黑" if prev_ma.color == "B" else "白"
+            prev_section = (
+                f"【上一手背景】{prev_color}棋第 {prev_ma.move_number} 手 "
+                f"{prev_ma.gtp_coord}，此时{color_cn}棋的胜率为 "
+                f"{ma.winrate_before:.1%}，目差 {ma.score_before:+.1f}。\n"
+            )
+            if prev_ma.best_variations:
+                prev_section += (
+                    f"  上一手的意图/最佳变化: "
+                    f"{' → '.join(prev_ma.best_variations[0].pv[:5])}\n"
+                )
+
+        # ── 当前问题手 ──
+        vars_text = self._format_variations(ma.best_variations)
+        best_move = ma.best_variations[0].move if ma.best_variations else "未知"
+        best_pv = " → ".join(ma.best_variations[0].pv[:8]) if ma.best_variations and ma.best_variations[0].pv else "无"
+
+        current_section = (
+            f"【问题手】{color_cn}棋第 {ma.move_number} 手实战走了 {ma.gtp_coord} ({sev_text})\n"
+            f"- 胜率变化: {ma.winrate_before:.1%} → {ma.winrate_after:.1%} (跌幅 {ma.winrate_drop:.1%})\n"
+            f"- 目差变化: {ma.score_before:+.1f} → {ma.score_after:+.1f} (亏损 {ma.score_drop:+.1f} 目)\n"
+            f"- KataGo 认为此处最佳手是 {best_move}，最佳变化: {best_pv}\n"
+            f"- 全部推荐着手:\n{vars_text}\n"
+        )
+
+        # ── 下一手（对手惩罚） ──
+        next_section = ""
+        if next_ma:
+            next_section = (
+                f"【下一手惩罚】{opp_cn}棋第 {next_ma.move_number} 手实战走了 "
+                f"{next_ma.gtp_coord}\n"
+            )
+            if next_ma.best_variations:
+                opp_best = next_ma.best_variations[0]
+                opp_pv = " → ".join(opp_best.pv[:8]) if opp_best.pv else "无"
+                next_section += (
+                    f"  {opp_cn}棋此刻最佳手为 {opp_best.move}，"
+                    f"胜率={opp_best.winrate:.1%}，目差={opp_best.score_lead:+.1f}\n"
+                    f"  最佳后续变化: {opp_pv}\n"
+                )
+            next_section += (
+                f"  此后{color_cn}棋胜率变为 {next_ma.winrate_after:.1%}，"
+                f"目差 {next_ma.score_after:+.1f}\n"
             )
 
+        # ── ownership 分析段落 ──
+        ownership_section = ""
+        if ma.ownership_context:
+            ownership_section = f"\n【领地归属变化】\n{ma.ownership_context}\n"
+
         return (
-            f"棋谱: {game.info.black_player}(黑) vs {game.info.white_player}(白)\n"
-            f"规则: {game.info.rules}  贴目: {game.info.komi}\n\n"
-            f"以下是 KataGo 对{color_cn}棋第 {ma.move_number} 手 "
-            f"{ma.gtp_coord} 的分析:\n"
-            f"- 判定: {sev_text}\n"
-            f"- 胜率变化: 从 {ma.winrate_before:.1%} 跌至 {ma.winrate_after:.1%} "
-            f"(跌幅 {ma.winrate_drop:.1%})\n"
-            f"- 目差变化: 从 {ma.score_before:+.1f} 变为 {ma.score_after:+.1f} "
-            f"(落差 {ma.score_drop:+.1f})\n"
-            f"- KataGo 推荐着手:\n{vars_text}\n"
+            f"你是一位专业围棋解说员，正在为业余棋手做复盘解说。\n"
+            f"棋谱: {game.info.black_player}(黑) vs {game.info.white_player}(白)，"
+            f"规则: {game.info.rules}，贴目: {game.info.komi}\n\n"
+            f"以下是 KataGo AI 对一步问题手的完整上下文分析:\n\n"
+            f"{prev_section}\n"
+            f"{current_section}\n"
+            f"{next_section}\n"
             f"{ownership_section}\n"
-            f"请严格按照以下优先级分析这步棋:\n"
-            f"1. 【目数/实地】(最高优先级): 这步棋导致了多少目的实地得失？"
-            f"哪个区域的实地受到了影响？与推荐手相比损失了多少目？\n"
-            f"2. 【厚薄/势力】(第二优先级): 这步棋是否让棋形变薄了？"
-            f"是否放弃了重要的外势或发展潜力？是否留下了后续的薄味？\n"
-            f"3. 【死活】(如果涉及): 这步棋是否危及了某个棋群的安全？"
-            f"是否错过了攻击对方薄弱棋群的时机？\n\n"
-            f"请用 2-4 段话回答。先讲清楚目数上亏了多少、为什么亏，"
-            f"再从厚薄角度补充战略层面的影响，最后如果涉及死活也要提到。"
-            f"使用围棋术语但照顾业余棋手理解水平。"
+            f"请结合上述上一手、当前手、下一手的前后因果关系，"
+            f"解释这步棋为什么是失误。要求:\n\n"
+            f"1. 【因果分析】(最重要): 实战走了 {ma.gtp_coord} 而不是最佳手 {best_move}，"
+            f"导致了什么后果？对手的 {next_ma.gtp_coord if next_ma else '后续手'} "
+            f"如何惩罚了这步失误？整个崩盘链条是怎样的？\n\n"
+            f"2. 【目数/实地】: 这步棋直接导致了多少目的实地损失？"
+            f"是哪个区域的实地受到影响？推荐手能保住多少目？\n\n"
+            f"3. 【厚薄/棋型】: 这步棋是否导致棋形变薄、出现断点？"
+            f"是否破坏了自身阵势或给对手留下了利用？棋型效率如何？\n\n"
+            f"4. 【死活】(如果涉及): 这步棋是否危及了某个棋群的安危？"
+            f"是否错过了攻击或防守的急所？\n\n"
+            f"请用 2-4 段话回答。第一段重点讲「为什么错」和「对手怎么惩罚」的因果链条，"
+            f"后面从目数、厚薄/棋型、死活角度补充具体分析。"
+            f"使用专业围棋术语（如断点、眼位、先手利、厚味、薄味、急所、大场等），"
+            f"但要照顾业余棋手的理解水平，必要时用通俗语言解释术语。"
         )
 
 

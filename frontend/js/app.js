@@ -249,7 +249,9 @@
         goToMove(S.currentMove);
     });
 
-    // ── Start Review ───────────────────────────────────────
+    // ── Start / Stop Review ─────────────────────────────────
+
+    const btnStopReview = $('#btn-stop-review');
 
     $('#btn-start-review').addEventListener('click', async () => {
         if (!S.gameId) return;
@@ -263,9 +265,25 @@
             S.status = 'analyzing';
             reviewActions.classList.add('hidden');
             progressSection.classList.remove('hidden');
+            btnStopReview.disabled = false;
+            btnStopReview.textContent = '停止分析';
             connectWS();
         } catch (e) {
             alert('启动分析失败: ' + e.message);
+        }
+    });
+
+    btnStopReview.addEventListener('click', async () => {
+        if (!S.gameId || S.status !== 'analyzing') return;
+        btnStopReview.disabled = true;
+        btnStopReview.textContent = '正在停止…';
+        try {
+            await api(`/api/review/${S.gameId}/stop`, { method: 'POST' });
+            progressText.textContent = '正在停止，生成已分析部分的结果…';
+        } catch (e) {
+            btnStopReview.disabled = false;
+            btnStopReview.textContent = '停止分析';
+            alert('停止失败: ' + e.message);
         }
     });
 
@@ -284,12 +302,19 @@
                 progressBar.style.width = pct + '%';
                 progressText.textContent = `分析中 ${msg.current} / ${msg.total}`;
             } else if (msg.type === 'done') {
-                progressBar.style.width = '100%';
-                progressText.textContent = `分析完成！共发现 ${msg.totalProblems} 个问题手`;
-                setTimeout(() => progressSection.classList.add('hidden'), 2000);
+                btnStopReview.disabled = true;
+                if (msg.partial) {
+                    progressBar.style.width = '100%';
+                    progressText.textContent = `分析已停止，已分析 ${msg.analyzedMoves} 手，发现 ${msg.totalProblems} 个问题手`;
+                } else {
+                    progressBar.style.width = '100%';
+                    progressText.textContent = `分析完成！共发现 ${msg.totalProblems} 个问题手`;
+                }
+                setTimeout(() => progressSection.classList.add('hidden'), 2500);
                 S.status = 'reviewed';
                 await loadResults();
             } else if (msg.type === 'error') {
+                btnStopReview.disabled = true;
                 progressText.textContent = '分析出错: ' + msg.message;
                 progressBar.style.width = '0';
             }
@@ -337,8 +362,9 @@
             S.moveAnalyses = data.moveAnalyses || [];
             S.problemMoves = data.problemMoves || [];
             S.winrateCurve = data.blackWinrateCurve || [];
+            S.whiteWinrateCurve = data.whiteWinrateCurve || [];
 
-            chart.setData(S.winrateCurve, S.problemMoves);
+            chart.setData(S.winrateCurve, S.whiteWinrateCurve, S.problemMoves);
             renderProblemList();
             reviewActions.classList.add('hidden');
             goToMove(S.currentMove);
@@ -346,6 +372,16 @@
             console.error('加载结果失败:', e);
         }
     }
+
+    // ── Chart View Toggle ─────────────────────────────────
+
+    document.querySelectorAll('#chart-view-btns .view-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#chart-view-btns .view-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            chart.setViewMode(btn.dataset.view);
+        });
+    });
 
     // ── Analysis Panel ─────────────────────────────────────
 
@@ -355,7 +391,7 @@
             analysisBody.innerHTML = '<div class="placeholder">选择一手棋查看分析</div>';
             severityBadge.classList.add('hidden');
             variationsBody.innerHTML = '<div class="placeholder">完成分析后查看推荐变化</div>';
-            commentBody.innerHTML = '<div class="placeholder">问题手将自动获得 AI 解说</div>';
+            commentBody.innerHTML = '<div class="placeholder">问题手将自动获得 AI 评价</div>';
             return;
         }
 
@@ -467,23 +503,23 @@
 
     function renderComment(ma) {
         if (!ma) {
-            commentBody.innerHTML = '<div class="placeholder">问题手将自动获得 AI 解说</div>';
+            commentBody.innerHTML = '<div class="placeholder">问题手将自动获得 AI 评价</div>';
             return;
         }
         if (ma.comment) {
             const paragraphs = ma.comment.split(/\n\n|\n/).filter(p => p.trim());
             commentBody.innerHTML = paragraphs.map(p => `<p class="comment-text">${escapeHtml(p)}</p>`).join('');
         } else if (ma.isProblem) {
-            commentBody.innerHTML = '<div class="placeholder">点击「生成解说」获取 AI 分析</div>';
+            commentBody.innerHTML = '<div class="placeholder">点击「生成评价」获取 AI 分析</div>';
         } else {
-            commentBody.innerHTML = '<div class="placeholder">该手无需解说</div>';
+            commentBody.innerHTML = '<div class="placeholder">该手无需评价</div>';
         }
     }
 
     $('#btn-gen-comment').addEventListener('click', async () => {
         const n = S.currentMove;
         if (!n || !S.gameId || !S.moveAnalyses.length) return;
-        commentBody.innerHTML = '<div class="comment-loading">正在生成 AI 解说…</div>';
+        commentBody.innerHTML = '<div class="comment-loading">正在生成 AI 评价…</div>';
         try {
             const data = await api(`/api/review/${S.gameId}/comment/${n}`, {
                 method: 'POST',
@@ -546,6 +582,7 @@
         S.moveAnalyses = [];
         S.problemMoves = [];
         S.winrateCurve = [];
+        S.whiteWinrateCurve = [];
         if (S.ws) { S.ws.close(); S.ws = null; }
 
         appEl.classList.add('hidden');
