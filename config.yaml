@@ -1,8 +1,8 @@
 katago:
-  executable: "path/to/katago.exe"       # KataGo 可执行文件路径
-  model: "path/to/model.bin.gz"          # 神经网络权重文件路径
-  config: ""                              # analysis_config.cfg 路径（留空使用默认配置）
-  max_visits: 500                         # 每个局面的搜索次数
+  executable: "E:\\pythontest\\batch_clear_product\\katago_review\\katago\\katago-v1.16.4-eigenavx2-windows-x64\\katago.exe"       # KataGo 可执行文件路径
+  model: "E:\\pythontest\\batch_clear_product\\katago_review\\katago\\kata1-b28c512nbt-s12614242560-d5766318893.bin.gz"          # 神经网络权重文件路径
+  config: "E:\\pythontest\\batch_clear_product\\katago_review\\katago\\katago-v1.16.4-eigenavx2-windows-x64\\analysis_example.cfg"  # analysis_config.cfg 路径
+  max_visits: 10                         # 每个局面的搜索次数
   threads: 4                              # 搜索线程数
 
 review:
