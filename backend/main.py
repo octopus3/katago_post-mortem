@@ -465,14 +465,19 @@ async def generate_comment(game_id: str, move_number: int, body: CommentRequest 
             detail=f"手数超出范围 (1-{session.result.total_moves})",
         )
 
-    ma = session.result.move_analyses[move_number - 1]
+    all_ma = session.result.move_analyses
+    ma = all_ma[move_number - 1]
 
     if ma.comment and not body.force:
         return {"moveNumber": move_number, "comment": ma.comment, "cached": True}
 
+    idx = move_number - 1
+    prev_ma = all_ma[idx - 1] if idx > 0 else None
+    next_ma = all_ma[idx + 1] if idx + 1 < len(all_ma) else None
+
     reviewer = Reviewer(engine, cfg.review, llm_service)
     try:
-        prompt = reviewer._build_comment_prompt(session.parsed, ma)
+        prompt = reviewer._build_comment_prompt(session.parsed, ma, prev_ma, next_ma)
         comment = (await llm_service.chat(prompt)).strip()
         ma.comment = comment
     except Exception as e:
