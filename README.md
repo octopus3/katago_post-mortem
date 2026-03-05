@@ -65,3 +65,5 @@ katago_review/
 ## 效果截图
 ![主界面](test/1.png)
 ![分析详情](test/2.png)
+![其他效果图](test/3.png)
+![其他效果图](test/4.png)
