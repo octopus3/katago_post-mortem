@@ -4,6 +4,7 @@
     1. 目数/实地得失  — 最高优先级
     2. 厚薄/势力消长  — 第二优先级
     3. 死活安危        — 必须关注
+    4. 棋形/棋型变化  — 必须关注
 
 用法:
     reviewer = Reviewer(engine, cfg.review, llm)
@@ -31,6 +32,8 @@ ProgressCallback = Optional[Callable[[int, int], Coroutine]]
 
 class Severity(str, Enum):
     """问题手严重程度。"""
+    VULGAR = "vulgar"             # 俗手     5%+（先手但时机不对）
+    SLOW = "slow"                 # 缓手     5%+（效率低，有更大的棋）
     MINOR = "minor"               # 小疑问手 15%+
     QUESTIONABLE = "questionable"  # 疑问手   20%+
     BAD = "bad"                    # 恶手     25%+
@@ -43,17 +46,97 @@ _SEVERITY_THRESHOLDS: List[Tuple[float, Severity]] = [
 ]
 
 _SEVERITY_CN: Dict[Severity, str] = {
+    Severity.VULGAR: "俗手",
+    Severity.SLOW: "缓手",
     Severity.MINOR: "小疑问手",
     Severity.QUESTIONABLE: "疑问手",
     Severity.BAD: "恶手",
 }
 
+_VULGAR_SLOW_MIN_DROP = 0.05
+_VULGAR_SLOW_MAX_DROP = 0.15
+_SENTE_DISTANCE = 4
+
 
 def _classify_severity(wr_drop: float) -> Optional[Severity]:
-    """根据胜率跌幅返回严重程度等级，低于 15% 返回 None。"""
+    """根据胜率跌幅返回严重程度等级，低于 15% 返回 None。
+
+    俗手/缓手 (5%-15%) 由 _classify_style 单独判定。
+    """
     for threshold, sev in _SEVERITY_THRESHOLDS:
         if wr_drop >= threshold:
             return sev
+    return None
+
+
+def _gtp_to_xy(gtp: str) -> Optional[Tuple[int, int]]:
+    """GTP 坐标 → (x, y) 数值坐标。pass 或无效返回 None。"""
+    if not gtp or gtp.lower() == "pass":
+        return None
+    try:
+        letter = gtp[0].upper()
+        col = "ABCDEFGHJKLMNOPQRST".index(letter)
+        row = int(gtp[1:]) - 1
+        return (col, row)
+    except (ValueError, IndexError):
+        return None
+
+
+def _coord_distance(a: str, b: str) -> Optional[int]:
+    """两个 GTP 坐标之间的切比雪夫距离（棋盘格距离）。"""
+    pa, pb = _gtp_to_xy(a), _gtp_to_xy(b)
+    if pa is None or pb is None:
+        return None
+    return max(abs(pa[0] - pb[0]), abs(pa[1] - pb[1]))
+
+
+def _find_actual_in_candidates(
+    actual_gtp: str,
+    move_infos: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """在 KataGo moveInfos 中查找实战着手，返回匹配项或 None。"""
+    actual_upper = actual_gtp.upper()
+    for info in move_infos:
+        if info.get("move", "").upper() == actual_upper:
+            return info
+    return None
+
+
+def _classify_style(
+    wr_drop: float,
+    actual_gtp: str,
+    move_infos_before: List[Dict[str, Any]],
+    move_infos_after: List[Dict[str, Any]],
+    best_move_gtp: str,
+) -> Optional[Severity]:
+    """判定 5%-15% 胜率跌幅区间内的着手是俗手、缓手还是忽略。
+
+    俗手: 实战着手出现在 AI 候选列表中（说明不是坏棋），
+          且对手最佳应手在实战着手附近（说明是先手交换），
+          但 AI 第一推荐在别处（时机不对的先手交换）。
+    缓手: AI 推荐手和实战着手距离较远（说明有更大的棋），
+          且对手不需要在附近应（非先手/效率低）。
+    """
+    if not (_VULGAR_SLOW_MIN_DROP <= wr_drop < _VULGAR_SLOW_MAX_DROP):
+        return None
+
+    actual_in_list = _find_actual_in_candidates(actual_gtp, move_infos_before)
+    dist_to_best = _coord_distance(actual_gtp, best_move_gtp)
+
+    opp_response = move_infos_after[0].get("move", "") if move_infos_after else ""
+    dist_opp_to_actual = _coord_distance(actual_gtp, opp_response)
+
+    is_sente = (
+        dist_opp_to_actual is not None
+        and dist_opp_to_actual <= _SENTE_DISTANCE
+    )
+
+    if actual_in_list and is_sente and dist_to_best is not None and dist_to_best > _SENTE_DISTANCE:
+        return Severity.VULGAR
+
+    if dist_to_best is not None and dist_to_best > 6:
+        return Severity.SLOW
+
     return None
 
 
@@ -137,6 +220,7 @@ class MoveAnalysis:
     is_problem: bool = False
     severity: Optional[Severity] = None
     comment: str = ""
+    actual_rank_in_candidates: Optional[int] = None     # 实战着手在 AI 候选列表中的排名（1-based）
     # ownership 分析（需要 includeOwnership=True）
     territory_before: Optional[TerritoryEstimate] = None
     territory_after: Optional[TerritoryEstimate] = None
@@ -204,16 +288,16 @@ class ReviewResult:
 
 
 class Reviewer:
-    """协调 KataGo 分析、胜率落差计算、问题手识别与 LLM 解说。
+    """协调 KataGo 分析、胜率落差计算、问题手识别与 LLM 评价。
 
-    解说维度优先级: 目数 > 厚薄 > 死活
+    评价维度优先级: 目数 > 厚薄 > 死活
 
     典型流程:
         1. 逐手发送 KataGo 分析请求（含 ownership）
         2. 对比前后胜率 + ownership 计算落差
         3. 按阈值标记问题手并分级
         4. 从 ownership 提取目数得失、厚薄变化、死活信号
-        5. 组装结构化 prompt，调用 LLM 生成分维度解说
+        5. 组装结构化 prompt，调用 LLM 生成分维度评价
     """
 
     def __init__(
@@ -240,7 +324,7 @@ class Reviewer:
 
         Args:
             game: sgf_parser.parse_sgf() 返回的 ParsedGame
-            with_comments: 是否为问题手生成 LLM 解说
+            with_comments: 是否为问题手生成 LLM 评价
             progress_callback: ``async callable(current, total)`` 进度回调
             cancel_event: 外部可设置此事件来中途停止分析，已完成的部分将生成结果
 
@@ -405,6 +489,25 @@ class Reviewer:
             variations = self._extract_variations(raw[i])
             severity = _classify_severity(wr_drop)
 
+            move_infos_before = raw[i].get("moveInfos", [])
+            move_infos_after = raw[i + 1].get("moveInfos", [])
+            best_move_gtp = move_infos_before[0].get("move", "") if move_infos_before else ""
+
+            actual_rank: Optional[int] = None
+            for rank_idx, info in enumerate(move_infos_before):
+                if info.get("move", "").upper() == move.gtp_coord.upper():
+                    actual_rank = rank_idx + 1
+                    break
+
+            if severity is None:
+                style_sev = _classify_style(
+                    wr_drop, move.gtp_coord,
+                    move_infos_before, move_infos_after,
+                    best_move_gtp,
+                )
+                if style_sev is not None:
+                    severity = style_sev
+
             # — ownership 分析 —
             own_before_raw = raw[i].get("ownership")
             own_after_raw = raw[i + 1].get("ownership")
@@ -440,6 +543,7 @@ class Reviewer:
                 best_variations=variations,
                 is_problem=severity is not None,
                 severity=severity,
+                actual_rank_in_candidates=actual_rank,
                 territory_before=territory_before,
                 territory_after=territory_after,
                 ownership_context=ownership_ctx,
@@ -466,7 +570,7 @@ class Reviewer:
             for info in infos[:top_n]
         ]
 
-    # ── LLM 解说 ──────────────────────────────────────────────
+    # ── LLM 评价 ──────────────────────────────────────────────
 
     async def _generate_comments(
         self,
@@ -474,12 +578,12 @@ class Reviewer:
         targets: List[MoveAnalysis],
         all_analyses: List[MoveAnalysis],
     ) -> None:
-        """为目标问题手逐个生成 LLM 解说，结果直接写入 MoveAnalysis.comment。
+        """为目标问题手逐个生成 LLM 评价，结果直接写入 MoveAnalysis.comment。
 
-        通过 all_analyses 获取上一手和下一手的上下文，让解说能
+        通过 all_analyses 获取上一手和下一手的上下文，让评价能
         结合前后手的因果关系进行分析。
         """
-        logger.info("为 %d 个问题手生成 LLM 解说 …", len(targets))
+        logger.info("为 %d 个问题手生成 LLM 评价 …", len(targets))
 
         idx_by_move = {m.move_number: i for i, m in enumerate(all_analyses)}
 
@@ -491,9 +595,9 @@ class Reviewer:
             prompt = self._build_comment_prompt(game, ma, prev_ma, next_ma)
             try:
                 ma.comment = (await self._llm.chat(prompt)).strip()
-                logger.debug("第 %d 手解说完成 (%d/%d)", ma.move_number, idx + 1, len(targets))
+                logger.debug("第 %d 手评价完成 (%d/%d)", ma.move_number, idx + 1, len(targets))
             except Exception:
-                logger.exception("LLM 解说失败: 第 %d 手", ma.move_number)
+                logger.exception("LLM 评价失败: 第 %d 手", ma.move_number)
                 ma.comment = ""
 
     @staticmethod
@@ -515,91 +619,139 @@ class Reviewer:
         prev_ma: Optional[MoveAnalysis],
         next_ma: Optional[MoveAnalysis],
     ) -> str:
-        """结合上一手、当前手、下一手的完整上下文为问题手组装 LLM prompt。
+        """结合 AI 推荐变化中的前后手因果关系为问题手组装 LLM prompt。
 
-        分析角度: 目数/实地、厚薄/棋型、死活，并重点解释
-        失误导致的因果关系（对手如何惩罚）。
+        重点利用 KataGo PV（主要变化）数据:
+        - 推荐手的 PV 展示理想进程（对手如何应、己方如何续）
+        - 失误后对手的 AI 最佳应手展示惩罚链条
+        分析角度: 目数/实地、厚薄/棋型、死活。
         """
         sev_text = _SEVERITY_CN.get(ma.severity, "问题手")
         color_cn = "黑" if ma.color == "B" else "白"
         opp_cn = "白" if ma.color == "B" else "黑"
 
-        # ── 上一手（背景） ──
-        prev_section = ""
-        if prev_ma:
-            prev_color = "黑" if prev_ma.color == "B" else "白"
-            prev_section = (
-                f"【上一手背景】{prev_color}棋第 {prev_ma.move_number} 手 "
-                f"{prev_ma.gtp_coord}，此时{color_cn}棋的胜率为 "
-                f"{ma.winrate_before:.1%}，目差 {ma.score_before:+.1f}。\n"
+        # ── 1) 推荐手及其 AI 变化（正确的下法） ──
+        best_move = "未知"
+        ideal_section = ""
+        if ma.best_variations:
+            best_v = ma.best_variations[0]
+            best_move = best_v.move
+            pv = best_v.pv or []
+            # pv[0]=推荐手, pv[1]=对手应手, pv[2]=己方续手, ...
+            opp_reply_in_pv = pv[1] if len(pv) > 1 else "未知"
+            follow_up = " → ".join(pv[2:8]) if len(pv) > 2 else "无"
+            full_pv_str = " → ".join(pv[:10]) if pv else "无"
+
+            ideal_section = (
+                f"【AI 推荐的正确下法】\n"
+                f"  最佳手: {best_move}  胜率={best_v.winrate:.1%}  "
+                f"目差={best_v.score_lead:+.1f}\n"
+                f"  完整变化: {full_pv_str}\n"
+                f"  如果{color_cn}棋走 {best_move}，{opp_cn}棋的最佳应手是 "
+                f"{opp_reply_in_pv}，之后进程为: {follow_up}\n"
             )
-            if prev_ma.best_variations:
-                prev_section += (
-                    f"  上一手的意图/最佳变化: "
-                    f"{' → '.join(prev_ma.best_variations[0].pv[:5])}\n"
-                )
+            if len(ma.best_variations) > 1:
+                ideal_section += "  其他候选手:\n"
+                ideal_section += self._format_variations(
+                    ma.best_variations[1:], max_n=2,
+                ) + "\n"
 
-        # ── 当前问题手 ──
-        vars_text = self._format_variations(ma.best_variations)
-        best_move = ma.best_variations[0].move if ma.best_variations else "未知"
-        best_pv = " → ".join(ma.best_variations[0].pv[:8]) if ma.best_variations and ma.best_variations[0].pv else "无"
-
+        # ── 2) 实战问题手的数据 ──
+        rank_info = ""
+        if ma.actual_rank_in_candidates is not None:
+            rank_info = f"（AI 候选列表排名第 {ma.actual_rank_in_candidates}）"
         current_section = (
-            f"【问题手】{color_cn}棋第 {ma.move_number} 手实战走了 {ma.gtp_coord} ({sev_text})\n"
-            f"- 胜率变化: {ma.winrate_before:.1%} → {ma.winrate_after:.1%} (跌幅 {ma.winrate_drop:.1%})\n"
-            f"- 目差变化: {ma.score_before:+.1f} → {ma.score_after:+.1f} (亏损 {ma.score_drop:+.1f} 目)\n"
-            f"- KataGo 认为此处最佳手是 {best_move}，最佳变化: {best_pv}\n"
-            f"- 全部推荐着手:\n{vars_text}\n"
+            f"【实战着手】{color_cn}棋第 {ma.move_number} 手走了 "
+            f"{ma.gtp_coord} ({sev_text}){rank_info}\n"
+            f"  胜率: {ma.winrate_before:.1%} → {ma.winrate_after:.1%} "
+            f"(跌幅 {ma.winrate_drop:.1%})\n"
+            f"  目差: {ma.score_before:+.1f} → {ma.score_after:+.1f} "
+            f"(亏损 {ma.score_drop:+.1f} 目)\n"
         )
 
-        # ── 下一手（对手惩罚） ──
-        next_section = ""
-        if next_ma:
-            next_section = (
-                f"【下一手惩罚】{opp_cn}棋第 {next_ma.move_number} 手实战走了 "
-                f"{next_ma.gtp_coord}\n"
-            )
-            if next_ma.best_variations:
-                opp_best = next_ma.best_variations[0]
-                opp_pv = " → ".join(opp_best.pv[:8]) if opp_best.pv else "无"
-                next_section += (
-                    f"  {opp_cn}棋此刻最佳手为 {opp_best.move}，"
-                    f"胜率={opp_best.winrate:.1%}，目差={opp_best.score_lead:+.1f}\n"
-                    f"  最佳后续变化: {opp_pv}\n"
-                )
-            next_section += (
-                f"  此后{color_cn}棋胜率变为 {next_ma.winrate_after:.1%}，"
-                f"目差 {next_ma.score_after:+.1f}\n"
+        # ── 3) 失误后 AI 分析的对手最佳惩罚手 ──
+        punish_section = ""
+        if next_ma and next_ma.best_variations:
+            punish_v = next_ma.best_variations[0]
+            punish_pv = punish_v.pv or []
+            punish_pv_str = " → ".join(punish_pv[:10]) if punish_pv else "无"
+            punish_section = (
+                f"【走了 {ma.gtp_coord} 后 AI 分析的对手最佳应对】\n"
+                f"  {color_cn}棋走了 {ma.gtp_coord} 之后，AI 认为"
+                f"{opp_cn}棋的最佳应手是 {punish_v.move}，"
+                f"胜率={punish_v.winrate:.1%}，目差={punish_v.score_lead:+.1f}\n"
+                f"  后续变化: {punish_pv_str}\n"
             )
 
-        # ── ownership 分析段落 ──
+        # ── 4) ownership 分析 ──
         ownership_section = ""
         if ma.ownership_context:
             ownership_section = f"\n【领地归属变化】\n{ma.ownership_context}\n"
+
+        # ── 5) 根据问题类型定制分析要求 ──
+        punish_move_str = (
+            next_ma.best_variations[0].move
+            if next_ma and next_ma.best_variations
+            else "后续手"
+        )
+
+        if ma.severity == Severity.VULGAR:
+            style_instruction = (
+                f"AI 判定这是一步「俗手」——{ma.gtp_coord} 虽然是先手（对手会在附近应），"
+                f"但这个先手交换在当前盘面上并不是最紧迫的。"
+                f"AI 推荐的 {best_move} 才是当前急所/大场。\n\n"
+                f"请解释:\n"
+                f"1. 【先手交换的代价】: {ma.gtp_coord} 虽然是先手，但这个交换"
+                f"让{color_cn}棋付出了什么代价？是否消除了未来的变化余地（aji）？"
+                f"是否帮对手固定了棋形？是否让对手的薄味消失了？\n\n"
+                f"2. 【时机问题】: 为什么现在不应该走这个交换？当前盘面上"
+                f"最紧迫的是什么（AI 推荐的 {best_move}）？这个大场/急所"
+                f"为什么比先手交换更重要？\n\n"
+                f"3. 【目数/效率】: 这步俗手导致了约 {abs(ma.score_drop):.1f} 目的损失，"
+                f"为什么看似不亏的先手交换实际上亏了目数？\n\n"
+            )
+        elif ma.severity == Severity.SLOW:
+            style_instruction = (
+                f"AI 判定这是一步「缓手」——{ma.gtp_coord} 在当前盘面上效率不够高，"
+                f"有更大的棋（AI 推荐 {best_move}）没有走。\n\n"
+                f"请解释:\n"
+                f"1. 【效率对比】: 实战 {ma.gtp_coord} 的价值有多大？"
+                f"AI 推荐的 {best_move} 价值有多大？两者差了多少目？"
+                f"为什么 {best_move} 是更高效的选点？\n\n"
+                f"2. 【大局观】: 当前盘面的焦点在哪里？{ma.gtp_coord} 是否偏离了"
+                f"当前的战斗焦点或全局最大的地方？是后手还是先手？\n\n"
+                f"3. 【棋形/厚薄】: {ma.gtp_coord} 是否过于保守/消极？"
+                f"是否把棋走重了？与 {best_move} 在棋形效率上有何差别？\n\n"
+            )
+        else:
+            style_instruction = (
+                f"请结合以上 AI 变化数据，解释这步棋为什么是失误。要求:\n\n"
+                f"1. 【因果分析】(最重要): 对比推荐手 {best_move} 和实战 "
+                f"{ma.gtp_coord} 的区别。如果走了推荐手，AI 变化中{opp_cn}棋"
+                f"会怎么应，局面会怎么发展？而实战走了 {ma.gtp_coord} 之后，"
+                f"{opp_cn}棋通过 {punish_move_str} 如何惩罚这步失误？"
+                f"请把从失误到被惩罚的因果链条讲清楚。\n\n"
+                f"2. 【目数/实地】: 这步棋导致了约 {abs(ma.score_drop):.1f} 目的"
+                f"损失，具体是哪个区域的实地受到影响？推荐手能保住多少目？\n\n"
+                f"3. 【厚薄/棋型】: 这步棋是否导致棋形变薄、出现断点？"
+                f"是否破坏了自身阵势或留下薄味？与推荐手在棋型效率上有何差别？\n\n"
+                f"4. 【死活】(如果涉及): 这步棋是否危及了某个棋群的安危？"
+                f"是否错过了攻击或防守的急所？\n\n"
+            )
 
         return (
             f"你是一位专业围棋解说员，正在为业余棋手做复盘解说。\n"
             f"棋谱: {game.info.black_player}(黑) vs {game.info.white_player}(白)，"
             f"规则: {game.info.rules}，贴目: {game.info.komi}\n\n"
-            f"以下是 KataGo AI 对一步问题手的完整上下文分析:\n\n"
-            f"{prev_section}\n"
+            f"以下是 KataGo AI 对第 {ma.move_number} 手的完整分析，"
+            f"包含 AI 推荐变化和实战后的对手应对:\n\n"
+            f"{ideal_section}\n"
             f"{current_section}\n"
-            f"{next_section}\n"
+            f"{punish_section}\n"
             f"{ownership_section}\n"
-            f"请结合上述上一手、当前手、下一手的前后因果关系，"
-            f"解释这步棋为什么是失误。要求:\n\n"
-            f"1. 【因果分析】(最重要): 实战走了 {ma.gtp_coord} 而不是最佳手 {best_move}，"
-            f"导致了什么后果？对手的 {next_ma.gtp_coord if next_ma else '后续手'} "
-            f"如何惩罚了这步失误？整个崩盘链条是怎样的？\n\n"
-            f"2. 【目数/实地】: 这步棋直接导致了多少目的实地损失？"
-            f"是哪个区域的实地受到影响？推荐手能保住多少目？\n\n"
-            f"3. 【厚薄/棋型】: 这步棋是否导致棋形变薄、出现断点？"
-            f"是否破坏了自身阵势或给对手留下了利用？棋型效率如何？\n\n"
-            f"4. 【死活】(如果涉及): 这步棋是否危及了某个棋群的安危？"
-            f"是否错过了攻击或防守的急所？\n\n"
-            f"请用 2-4 段话回答。第一段重点讲「为什么错」和「对手怎么惩罚」的因果链条，"
-            f"后面从目数、厚薄/棋型、死活角度补充具体分析。"
-            f"使用专业围棋术语（如断点、眼位、先手利、厚味、薄味、急所、大场等），"
+            f"{style_instruction}"
+            f"请用 2-4 段话回答。使用专业围棋术语（如俗手、缓手、先手利、"
+            f"后手、大场、急所、断点、厚味、薄味、aji、棋形效率等），"
             f"但要照顾业余棋手的理解水平，必要时用通俗语言解释术语。"
         )
 

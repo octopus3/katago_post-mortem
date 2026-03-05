@@ -423,6 +423,14 @@ body {
     background: var(--danger);
     color: #fff;
 }
+.badge-vulgar {
+    background: #e0e7ff;
+    color: #3730a3;
+}
+.badge-slow {
+    background: #dbeafe;
+    color: #1e40af;
+}
 .badge-minor {
     background: #fef3c7;
     color: #92400e;
@@ -517,6 +525,8 @@ body {
 .problem-severity { font-size: 12px; font-weight: 600; }
 .problem-drop { font-size: 12px; color: var(--text2); margin-left: auto; }
 
+.sev-vulgar { color: #4f46e5; }
+.sev-slow { color: #2563eb; }
 .sev-minor { color: #d97706; }
 .sev-questionable { color: #ea580c; }
 .sev-bad { color: #dc2626; }

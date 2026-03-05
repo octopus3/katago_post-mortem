@@ -432,7 +432,7 @@
             </div>`;
 
         if (ma.isProblem && ma.severity) {
-            const sevMap = { minor: ['小疑问手', 'badge-minor'], questionable: ['疑问手', 'badge-questionable'], bad: ['恶手', 'badge-bad'] };
+            const sevMap = { vulgar: ['俗手', 'badge-vulgar'], slow: ['缓手', 'badge-slow'], minor: ['小疑问手', 'badge-minor'], questionable: ['疑问手', 'badge-questionable'], bad: ['恶手', 'badge-bad'] };
             const [text, cls] = sevMap[ma.severity] || ['问题手', 'badge-bad'];
             severityBadge.textContent = text;
             severityBadge.className = `badge ${cls}`;
@@ -547,7 +547,7 @@
         problemCount.textContent = S.problemMoves.length;
         problemCount.classList.remove('hidden');
 
-        const sevCN = { minor: '小疑问', questionable: '疑问手', bad: '恶手' };
+        const sevCN = { vulgar: '俗手', slow: '缓手', minor: '小疑问', questionable: '疑问手', bad: '恶手' };
 
         const items = S.problemMoves.map(pm => {
             const ma = S.moveAnalyses[pm.moveNumber - 1];

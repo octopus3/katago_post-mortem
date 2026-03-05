@@ -179,7 +179,7 @@ class WinrateChart {
 
         const problemData = new Array(bc.length).fill(null);
         const problemColors = new Array(bc.length).fill('transparent');
-        const sevColorMap = { minor: '#f59e0b', questionable: '#ea580c', bad: '#dc2626' };
+        const sevColorMap = { vulgar: '#6366f1', slow: '#3b82f6', minor: '#f59e0b', questionable: '#ea580c', bad: '#dc2626' };
 
         for (const pm of this._problemMoves) {
             const idx = pm.moveNumber;
