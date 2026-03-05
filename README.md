@@ -61,3 +61,7 @@ katago_review/
 ├── config.yaml              # 用户配置
 └── README.md
 ```
+
+## 效果截图
+![主界面](test/1.png)
+![分析详情](test/2.png)
