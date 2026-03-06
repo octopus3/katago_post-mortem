@@ -25,6 +25,13 @@
             </label>
         </div>
         <div id="upload-error" class="upload-error hidden"></div>
+        <div class="upload-import">
+            <span class="upload-divider">或者导入已保存的复盘</span>
+            <label class="btn btn-outline btn-import">
+                导入复盘 JSON
+                <input type="file" id="import-input" accept=".json" hidden>
+            </label>
+        </div>
     </div>
 </div>
 
@@ -37,6 +44,7 @@
         </div>
         <div class="header-center" id="game-info-header"></div>
         <div class="header-right">
+            <button class="btn btn-sm btn-outline hidden" id="btn-save-review">保存复盘</button>
             <button class="btn btn-sm btn-outline" id="btn-new-game">上传新棋谱</button>
         </div>
     </header>

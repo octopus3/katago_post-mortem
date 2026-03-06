@@ -58,6 +58,26 @@
 
     chart.onMoveClick = (idx) => goToMove(idx);
 
+    // ── Throttle helper ───────────────────────────────────
+
+    function throttle(fn, ms) {
+        let last = 0, timer = null;
+        return function (...args) {
+            const now = Date.now();
+            const remaining = ms - (now - last);
+            clearTimeout(timer);
+            if (remaining <= 0) {
+                last = now;
+                fn.apply(this, args);
+            } else {
+                timer = setTimeout(() => {
+                    last = Date.now();
+                    fn.apply(this, args);
+                }, remaining);
+            }
+        };
+    }
+
     // ── API helper ─────────────────────────────────────────
 
     async function api(url, opts = {}) {
@@ -181,7 +201,7 @@
 
     // ── Navigation ─────────────────────────────────────────
 
-    function goToMove(n) {
+    const goToMove = throttle(function (n) {
         n = Math.max(0, Math.min(n, S.totalMoves));
         S.currentMove = n;
         S.activeVariation = -1;
@@ -209,7 +229,7 @@
         moveSlider.value = n;
         chart.highlightMove(n);
         updateAnalysisPanel();
-    }
+    }, 50);
 
     S.showBestMove = false;
 
@@ -367,6 +387,7 @@
             chart.setData(S.winrateCurve, S.whiteWinrateCurve, S.problemMoves);
             renderProblemList();
             reviewActions.classList.add('hidden');
+            btnSaveReview.classList.remove('hidden');
             goToMove(S.currentMove);
         } catch (e) {
             console.error('加载结果失败:', e);
@@ -573,6 +594,107 @@
         });
     }
 
+    // ── Save / Import Review ────────────────────────────────
+
+    const btnSaveReview = $('#btn-save-review');
+    const importInput = $('#import-input');
+
+    function exportResults() {
+        if (!S.result || !S.moveAnalyses.length) {
+            alert('没有可保存的复盘结果');
+            return;
+        }
+
+        const payload = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            gameInfo: S.gameInfo,
+            totalMoves: S.totalMoves,
+            moves: S.moves,
+            moveAnalyses: S.moveAnalyses,
+            problemMoves: S.problemMoves,
+            blackWinrateCurve: S.winrateCurve,
+            whiteWinrateCurve: S.whiteWinrateCurve,
+        };
+
+        const json = JSON.stringify(payload, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const black = S.gameInfo.blackPlayer || 'B';
+        const white = S.gameInfo.whitePlayer || 'W';
+        const date = S.gameInfo.date || new Date().toISOString().slice(0, 10);
+        const filename = `复盘_${black}_vs_${white}_${date}.json`;
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    function importResults(file) {
+        if (!file || !file.name.toLowerCase().endsWith('.json')) {
+            showUploadError('请选择 .json 格式的复盘文件');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+
+                if (!data.gameInfo || !data.moves || !data.moveAnalyses) {
+                    showUploadError('无效的复盘文件：缺少必要数据');
+                    return;
+                }
+
+                S.gameId = null;
+                S.gameInfo = data.gameInfo;
+                S.totalMoves = data.totalMoves || data.moves.length;
+                S.moves = data.moves;
+                S.moveAnalyses = data.moveAnalyses || [];
+                S.problemMoves = data.problemMoves || [];
+                S.winrateCurve = data.blackWinrateCurve || [];
+                S.whiteWinrateCurve = data.whiteWinrateCurve || [];
+                S.result = data;
+                S.status = 'reviewed';
+                S.currentMove = 0;
+
+                uploadOverlay.classList.add('fade-out');
+                appEl.classList.remove('hidden');
+                uploadError.classList.add('hidden');
+
+                renderGameInfo();
+                moveSlider.max = S.totalMoves;
+                moveSlider.value = 0;
+
+                board.size = S.gameInfo.boardSize || 19;
+                board.resize();
+
+                chart.setData(S.winrateCurve, S.whiteWinrateCurve, S.problemMoves);
+                renderProblemList();
+                reviewActions.classList.add('hidden');
+                btnSaveReview.classList.remove('hidden');
+
+                goToMove(0);
+            } catch (err) {
+                showUploadError('解析复盘文件失败: ' + err.message);
+            }
+        };
+        reader.onerror = () => showUploadError('读取文件失败');
+        reader.readAsText(file);
+    }
+
+    btnSaveReview.addEventListener('click', throttle(exportResults, 2000));
+
+    importInput.addEventListener('change', () => {
+        if (importInput.files.length) importResults(importInput.files[0]);
+        importInput.value = '';
+    });
+
     // ── New Game ───────────────────────────────────────────
 
     $('#btn-new-game').addEventListener('click', () => {
@@ -590,7 +712,9 @@
         uploadError.classList.add('hidden');
         progressSection.classList.add('hidden');
         reviewActions.classList.remove('hidden');
+        btnSaveReview.classList.add('hidden');
         fileInput.value = '';
+        importInput.value = '';
     });
 
     // ── Utils ──────────────────────────────────────────────
