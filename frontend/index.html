@@ -81,6 +81,7 @@
                 <label class="opt-label"><input type="checkbox" id="chk-coords" checked> 坐标</label>
                 <label class="opt-label"><input type="checkbox" id="chk-numbers"> 手数</label>
                 <label class="opt-label"><input type="checkbox" id="chk-best-move"> 最佳着点</label>
+                <label class="opt-label"><input type="checkbox" id="chk-tryplay"> 试下</label>
             </div>
             <div id="review-actions" class="review-actions">
                 <button class="btn btn-primary btn-lg" id="btn-start-review">开始 AI 复盘分析</button>
@@ -123,6 +124,17 @@
                 </div>
                 <div class="card-body" id="analysis-body">
                     <div class="placeholder">浏览棋谱或完成分析后查看</div>
+                </div>
+            </div>
+
+            <!-- Try Play Result -->
+            <div class="card hidden" id="tryplay-card">
+                <div class="card-head">
+                    <span>试下分析</span>
+                    <button class="btn btn-xs btn-ghost" id="btn-clear-tryplay">清除</button>
+                </div>
+                <div class="card-body" id="tryplay-body">
+                    <div class="placeholder">开启试下模式后点击棋盘空位</div>
                 </div>
             </div>
 

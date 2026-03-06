@@ -206,6 +206,10 @@
         S.currentMove = n;
         S.activeVariation = -1;
 
+        if (S.tryPlayMode && tryplayBody) {
+            tryplayBody.innerHTML = '<div class="placeholder">点击棋盘空位落子试下</div>';
+        }
+
         const { board: pos, history } = buildPosition(n);
         let last = null;
         if (n > 0) {
@@ -268,6 +272,165 @@
         board.showBestMove = e.target.checked;
         goToMove(S.currentMove);
     });
+
+    // ── Try Play Mode ───────────────────────────────────────
+
+    S.tryPlayMode = false;
+    S.tryPlayLoading = false;
+
+    const tryplayCard = $('#tryplay-card');
+    const tryplayBody = $('#tryplay-body');
+
+    $('#chk-tryplay').addEventListener('change', (e) => {
+        S.tryPlayMode = e.target.checked;
+        board.onClick = S.tryPlayMode ? handleTryPlay : null;
+        boardCanvas.style.cursor = S.tryPlayMode ? 'crosshair' : '';
+        if (!S.tryPlayMode) {
+            clearTryPlay();
+        } else {
+            tryplayCard.classList.remove('hidden');
+            tryplayBody.innerHTML = '<div class="placeholder">点击棋盘空位落子试下</div>';
+        }
+    });
+
+    $('#btn-clear-tryplay').addEventListener('click', clearTryPlay);
+
+    function clearTryPlay() {
+        board.clearVariation();
+        S.activeVariation = -1;
+        tryplayBody.innerHTML = '<div class="placeholder">点击棋盘空位落子试下</div>';
+        if (!S.tryPlayMode) {
+            tryplayCard.classList.add('hidden');
+        }
+    }
+
+    function getNextColor() {
+        if (S.currentMove === 0) return 'B';
+        const lastMove = S.moves[S.currentMove - 1];
+        return lastMove && lastMove.color === 'B' ? 'W' : 'B';
+    }
+
+    function buildKataGoMoves(upTo) {
+        const result = [];
+        for (let i = 0; i < upTo && i < S.moves.length; i++) {
+            const m = S.moves[i];
+            result.push([m.color, m.gtpCoord]);
+        }
+        return result;
+    }
+
+    async function handleTryPlay(bx, by) {
+        if (S.tryPlayLoading) return;
+
+        const size = S.gameInfo.boardSize || 19;
+        const { board: pos } = buildPosition(S.currentMove);
+        if (pos[by] && pos[by][bx]) return;
+
+        const gtp = xyToGtp(bx, by, size);
+        if (!gtp) return;
+
+        const color = getNextColor();
+        const moves = buildKataGoMoves(S.currentMove);
+        moves.push([color, gtp]);
+
+        S.tryPlayLoading = true;
+        tryplayCard.classList.remove('hidden');
+        tryplayBody.innerHTML = '<div class="comment-loading">正在分析试下…</div>';
+
+        const colorCN = color === 'B' ? '黑' : '白';
+        const trialVarMoves = [{ gtp, color: color }];
+        board.setVariation(trialVarMoves);
+
+        try {
+            const data = await api('/api/tryplay', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    moves,
+                    komi: S.gameInfo.komi || 7.5,
+                    boardSize: size,
+                    rules: S.gameInfo.rules || 'chinese',
+                }),
+            });
+
+            const wrPct = (v) => (v * 100).toFixed(1) + '%';
+            const oppColor = color === 'B' ? 'W' : 'B';
+
+            let respHtml = `
+                <div style="margin-bottom:8px;font-weight:600">
+                    试下 ${colorCN} ${gtp}
+                </div>
+                <div class="analysis-grid">
+                    <div class="analysis-stat">
+                        <div class="stat-label">对方胜率</div>
+                        <div class="stat-value">${wrPct(data.winrate)}</div>
+                    </div>
+                    <div class="analysis-stat">
+                        <div class="stat-label">对方目差</div>
+                        <div class="stat-value">${data.scoreLead > 0 ? '+' : ''}${data.scoreLead.toFixed(1)}</div>
+                    </div>
+                </div>`;
+
+            if (data.bestMoves && data.bestMoves.length) {
+                respHtml += '<div style="margin-top:10px;font-weight:600;font-size:13px">对手最佳应对</div>';
+                respHtml += '<div class="var-list" style="margin-top:6px">';
+                data.bestMoves.slice(0, 5).forEach((bm, i) => {
+                    const rankCls = i < 3 ? `var-rank-${i + 1}` : '';
+                    const pvStr = bm.pv ? bm.pv.slice(0, 6).join(' → ') : '';
+                    respHtml += `<div class="var-item tryplay-var" data-idx="${i}">
+                        <div class="var-rank ${rankCls}">${i + 1}</div>
+                        <div>
+                            <div style="display:flex;gap:8px;align-items:baseline">
+                                <span class="var-move">${bm.move}</span>
+                                <span class="var-stats">胜率 ${wrPct(bm.winrate)}　目差 ${bm.scoreLead > 0 ? '+' : ''}${bm.scoreLead.toFixed(1)}　访问 ${bm.visits}</span>
+                            </div>
+                            ${pvStr ? `<div class="var-pv">${pvStr}</div>` : ''}
+                        </div>
+                    </div>`;
+                });
+                respHtml += '</div>';
+            }
+
+            tryplayBody.innerHTML = respHtml;
+
+            tryplayBody.querySelectorAll('.tryplay-var').forEach(el => {
+                el.addEventListener('click', () => {
+                    const idx = parseInt(el.dataset.idx, 10);
+                    const bm = data.bestMoves[idx];
+                    if (!bm || !bm.pv) return;
+
+                    tryplayBody.querySelectorAll('.tryplay-var').forEach(v => v.classList.remove('active'));
+                    el.classList.add('active');
+
+                    const varMoves = [{ gtp, color }];
+                    bm.pv.forEach((pvGtp, j) => {
+                        const pvColor = ((oppColor === 'B') === (j % 2 === 0)) ? 'B' : 'W';
+                        varMoves.push({ gtp: pvGtp, color: pvColor });
+                    });
+                    board.setVariation(varMoves);
+                });
+            });
+
+            if (data.bestMoves && data.bestMoves.length) {
+                const bm = data.bestMoves[0];
+                const varMoves = [{ gtp, color }];
+                if (bm.pv) {
+                    bm.pv.forEach((pvGtp, j) => {
+                        const pvColor = ((oppColor === 'B') === (j % 2 === 0)) ? 'B' : 'W';
+                        varMoves.push({ gtp: pvGtp, color: pvColor });
+                    });
+                }
+                board.setVariation(varMoves);
+                const firstItem = tryplayBody.querySelector('.tryplay-var');
+                if (firstItem) firstItem.classList.add('active');
+            }
+        } catch (e) {
+            tryplayBody.innerHTML = `<div class="placeholder" style="color:var(--danger)">分析失败: ${escapeHtml(e.message)}</div>`;
+            board.clearVariation();
+        } finally {
+            S.tryPlayLoading = false;
+        }
+    }
 
     // ── Start / Stop Review ─────────────────────────────────
 

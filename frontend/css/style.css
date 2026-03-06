@@ -560,6 +560,12 @@ body {
 .sev-questionable { color: #ea580c; }
 .sev-bad { color: #dc2626; }
 
+/* ── Try Play ────────────────────────────── */
+
+#tryplay-card .analysis-grid {
+    grid-template-columns: 1fr 1fr;
+}
+
 /* ── Responsive ──────────────────────────── */
 
 @media (max-width: 900px) {

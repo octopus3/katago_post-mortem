@@ -107,6 +107,13 @@ class CommentRequest(BaseModel):
     force: bool = False
 
 
+class TryPlayRequest(BaseModel):
+    moves: List[List[str]]
+    komi: float = 7.5
+    boardSize: int = 19
+    rules: str = "chinese"
+
+
 # ── 应用生命周期 ──────────────────────────────────────────────
 
 
@@ -484,6 +491,45 @@ async def generate_comment(game_id: str, move_number: int, body: CommentRequest 
         raise HTTPException(status_code=500, detail=f"LLM 解说生成失败: {e}")
 
     return {"moveNumber": move_number, "comment": ma.comment, "cached": False}
+
+
+# ── 试下分析 ──────────────────────────────────────────────────
+
+
+@app.post("/api/tryplay")
+async def try_play(body: TryPlayRequest):
+    """对指定局面调用 KataGo 分析，返回胜率、目差和最佳后续。"""
+    if not engine.is_running:
+        raise HTTPException(status_code=503, detail="KataGo 引擎未运行")
+
+    try:
+        result = await engine.query(
+            moves=body.moves,
+            komi=body.komi,
+            board_x_size=body.boardSize,
+            board_y_size=body.boardSize,
+            rules=body.rules,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"KataGo 查询失败: {e}")
+
+    root = result.get("rootInfo", {})
+    move_infos = result.get("moveInfos", [])
+
+    return {
+        "winrate": round(root.get("winrate", 0), 4),
+        "scoreLead": round(root.get("scoreLead", 0), 2),
+        "bestMoves": [
+            {
+                "move": mi.get("move"),
+                "winrate": round(mi.get("winrate", 0), 4),
+                "scoreLead": round(mi.get("scoreLead", 0), 2),
+                "visits": mi.get("visits", 0),
+                "pv": mi.get("pv", []),
+            }
+            for mi in move_infos[:5]
+        ],
+    }
 
 
 # ── WebSocket 端点 ────────────────────────────────────────────
